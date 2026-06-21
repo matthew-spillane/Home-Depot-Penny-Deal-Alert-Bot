@@ -36,8 +36,6 @@ class PennyBot(commands.Bot):
         self.cfg = cfg
         self.state = State(cfg.db_path)
         self.watcher = RedditWatcher(
-            client_id=cfg.reddit_client_id,
-            client_secret=cfg.reddit_client_secret,
             user_agent=cfg.reddit_user_agent,
             subreddits=cfg.subreddits,
             fetch_limit=cfg.reddit_fetch_limit,

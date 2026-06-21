@@ -87,7 +87,7 @@ auto-refreshes every 30s via a small `/api/alerts` JSON endpoint.
 ## Architecture
 
 ```
-Reddit (PRAW)  ─►  SKU Extractor  ─►  Dedup/State  ─►  Discord alert
+Reddit JSON    ─►  SKU Extractor  ─►  Dedup/State  ─►  Discord alert
   poll loop         (regex)           (SQLite)          (embed)
                                           │
                             Phase 2:  Inventory Checker  ◄── !check <SKU>
@@ -102,7 +102,7 @@ Railway worker service, no exposed port.
 |------|------|
 | `main.py` | entrypoint; builds `Config`, starts the bot |
 | `bot/config_types.py` | env-var config (`Config.load()`) |
-| `bot/reddit_watcher.py` | asyncpraw poller for new posts **and** comments |
+| `bot/reddit_watcher.py` | public-JSON (aiohttp) poller for new posts **and** comments |
 | `bot/sku_extractor.py` | regex extraction of internet#/SKU/model#/product-URL ids |
 | `bot/state.py` | SQLite: seen posts/comments + per-(SKU,store) daily alert dedup |
 | `bot/discord_bot.py` | bot, poll loop, `!check` / `!ping` commands |
@@ -116,13 +116,14 @@ Railway worker service, no exposed port.
 
 ## Setup (Phase 0)
 
-### 1. Reddit app (free)
-1. Go to <https://www.reddit.com/prefs/apps> → **create another app…**
-2. Type: **script**. Redirect URI can be `http://localhost:8080`.
-3. Copy the **client id** (under the app name) and **secret** into
-   `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`.
-4. Set `REDDIT_USER_AGENT` to something like
-   `penny-deal-bot/0.1 by u/yourname`.
+### 1. Reddit — nothing to register
+
+The watcher reads Reddit's **public, unauthenticated `.json` feeds** over plain
+HTTP, so there is **no Reddit account or app registration** (Reddit's script-app
+flow is now gated behind a moderation-use-case review that doesn't fit this
+project — and read-only public JSON doesn't need it). The only requirement is a
+descriptive `REDDIT_USER_AGENT` header — Reddit blocks generic/empty agents — and
+a sensible default is used if you leave it unset.
 
 ### 2. Discord bot
 1. <https://discord.com/developers/applications> → **New Application** → **Bot**.
