@@ -24,7 +24,10 @@ class ItemStatus:
     bay: str | None = None
     store_name: str | None = None
     product_url: str | None = None
-    error: str | None = None         # set when the lookup failed
+    error: str | None = None         # human-readable reason when found=False
+    lookup_failed: bool = False      # True only for transient/API failures
+                                     # (HTTP error, timeout, bad response) — NOT
+                                     # for a valid "item not found at store".
 
     def is_penny_hit(self, threshold: float) -> bool:
         """True when this looks like a real, buyable penny deal at the store."""

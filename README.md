@@ -18,8 +18,25 @@ phases slot into. See [the build order](#build-phases) below.
 | Phase | Scope | State |
 |------|-------|-------|
 | **1** | Reddit → Discord raw "possible penny deal mentioned" alerts, regex SKU extraction, SQLite dedup | ✅ implemented |
-| **2** | Store inventory verification behind a swappable `check_item()` interface (SerpApi), `!check` command | 🟡 interface + SerpApi skeleton in place; wiring/verification pending real key + store id |
-| **3** | Daily alert dedup, failure DMs, LLM SKU fallback, multi-store | 🟡 dedup + failure-DM hooks present; LLM fallback not started |
+| **2** | Store inventory verification behind a swappable `check_item()` interface (SerpApi); poll loop alerts only on verified penny hits; `!check` command | ✅ implemented — pending a real SerpApi key + store id to validate field mappings against live data |
+| **3** | Daily alert dedup, failure DMs, LLM SKU fallback, multi-store | 🟡 daily dedup + inventory/poll failure DMs done; LLM fallback + multi-store not started |
+
+### How verification gates alerts (Phase 2)
+
+The bot has two modes, chosen automatically at startup:
+
+- **Phase 2 (verified):** active when `INVENTORY_PROVIDER` is a real provider
+  (e.g. `serpapi`) **and** `DEFAULT_STORE_ID` is set. Each extracted SKU is
+  looked up at your store; the bot only posts a 🟢 alert when it's a real
+  **penny hit** — `price ≤ PENNY_PRICE_THRESHOLD` **and** in stock. Per-(SKU,
+  store) daily dedup keeps the same hit from re-pinging.
+- **Phase 1 (fallback):** if a provider or store isn't configured, the bot
+  keeps posting unverified 🟡 "possible penny deal mentioned" alerts, so it's
+  still useful before Phase 2 config is in place.
+
+If inventory lookups start failing repeatedly (HTTP errors / timeouts — *not*
+"item not found"), the bot DMs `DISCORD_OWNER_ID` so a silently-broken provider
+gets noticed fast.
 
 > **Important design rule (from the brief):** the inventory checker is the
 > single biggest long-term reliability risk. It lives entirely behind
@@ -154,8 +171,14 @@ factory) — no network or secrets required.
 
 ## Build phases
 
-Follows the brief's Section 8 in order; Phase 1 was built and verified before
-any Phase 2 inventory-gating logic. Phase 2 next steps: obtain a SerpApi key,
-confirm the store number, verify the field mappings in
-`serpapi_provider._parse` against a live response, then gate alerts on
-`ItemStatus.is_penny_hit(threshold)`.
+Follows the brief's Section 8 in order. Phase 1 (Reddit→Discord) and Phase 2
+(store verification) are implemented. **Remaining to fully trust Phase 2:**
+obtain a SerpApi key, confirm your store number, then verify the field mappings
+in `serpapi_provider._parse` against a real response — the engine name
+(`home_depot_product`), the `product_id`/`store_id` params, and the
+price/quantity/aisle paths are best-effort guesses and **must** be checked
+against live JSON before relying on the price gate. Run `!check <SKU>` against a
+known item to confirm the mapping end-to-end.
+
+Phase 3 leftovers: LLM SKU fallback for messy posts, `!addstore` multi-store
+support.

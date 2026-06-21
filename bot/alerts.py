@@ -47,13 +47,18 @@ def status_embed(status: ItemStatus, *, source: str | None = None,
     """Phase 2 alert / !check reply: a store-verified inventory result."""
     is_hit = threshold is not None and status.is_penny_hit(threshold)
     if not status.found:
-        embed = discord.Embed(
-            title="⚪ No store data",
+        if status.lookup_failed:
+            title = "🔴 Lookup failed"
+            color = 0xE74C3C
+        else:
+            title = "⚪ No store data"
+            color = 0x808080
+        return discord.Embed(
+            title=title,
             description=f"`{status.item_id}` — {status.error or 'no result'}",
-            color=0x808080,
+            color=color,
             timestamp=datetime.now(timezone.utc),
         )
-        return embed
 
     color = 0x2ECC71 if is_hit else 0x3498DB
     flag = "🟢 PENNY HIT" if is_hit else "🔵 Store result"

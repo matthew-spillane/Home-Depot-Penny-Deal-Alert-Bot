@@ -55,19 +55,22 @@ class SerpApiInventoryProvider(InventoryProvider):
         }
         try:
             session = await self._get_session()
-            async with session.get(_SERPAPI_ENDPOINT, params=params, timeout=20) as resp:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with session.get(_SERPAPI_ENDPOINT, params=params, timeout=timeout) as resp:
                 if resp.status != 200:
                     body = await resp.text()
                     return ItemStatus(
                         item_id=item_id,
                         store_id=store_id,
                         found=False,
+                        lookup_failed=True,
                         error=f"serpapi HTTP {resp.status}: {body[:200]}",
                     )
                 data = await resp.json()
         except Exception as exc:  # network / timeout / json — degrade gracefully
             return ItemStatus(
-                item_id=item_id, store_id=store_id, found=False, error=f"serpapi error: {exc}"
+                item_id=item_id, store_id=store_id, found=False,
+                lookup_failed=True, error=f"serpapi error: {exc}",
             )
 
         return self._parse(item_id, store_id, data)
@@ -75,13 +78,17 @@ class SerpApiInventoryProvider(InventoryProvider):
     @staticmethod
     def _parse(item_id: str, store_id: str, data: dict) -> ItemStatus:
         """Map SerpApi JSON -> ItemStatus. VERIFY field paths against live data."""
+        # SerpApi reports request-level problems (bad key, quota, bad params) in
+        # an "error" string — those are lookup failures, not "item not found".
         if "error" in data:
             return ItemStatus(
-                item_id=item_id, store_id=store_id, found=False, error=str(data["error"])
+                item_id=item_id, store_id=store_id, found=False,
+                lookup_failed=True, error=str(data["error"]),
             )
 
         product = data.get("product_results") or data.get("product") or {}
         if not product:
+            # Valid response, but the product genuinely isn't there. Not a failure.
             return ItemStatus(item_id=item_id, store_id=store_id, found=False,
                               error="no product_results in response")
 
