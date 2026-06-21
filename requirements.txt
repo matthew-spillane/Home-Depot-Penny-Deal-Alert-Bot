@@ -1,0 +1,8 @@
+# Core
+discord.py>=2.3,<3.0
+asyncpraw>=7.7,<9.0
+python-dotenv>=1.0
+
+# Phase 2 (inventory checker) — used by the SerpApi provider skeleton.
+# Safe to install now; not exercised until Phase 2 is enabled.
+aiohttp>=3.9
