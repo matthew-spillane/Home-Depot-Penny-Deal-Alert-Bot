@@ -58,6 +58,24 @@ Watch more than one store. Configure a base set via `DEFAULT_STORE_ID` +
 against every watched store; penny-hit dedup is per-`(SKU, store)` so each store
 can alert independently. Handy once the Peabody shop is in play.
 
+### Web dashboard (Phase 3 stretch)
+
+A self-contained web page showing alert history (penny hits + mentions), live
+stats, and the stores being watched — served by an aiohttp server **inside the
+bot's own event loop**, so there's still just one process.
+
+- **Off by default.** Leave `DASHBOARD_PORT` unset and the bot stays a portless
+  Railway *worker* exactly as before.
+- **To enable:** set `DASHBOARD_PORT` (locally, e.g. `8080` → open
+  `http://localhost:8080`). On a Railway **web** service, `PORT` is injected
+  automatically, so just deploy as a web service and leave `DASHBOARD_PORT`
+  blank — the dashboard uses `PORT`.
+- **Protect it:** a Railway web service is public, so set `DASHBOARD_TOKEN`;
+  the page then requires `?token=…`. `/healthz` stays open for health checks.
+
+Data is read straight from the same SQLite DB (`alerts_log` table), and the page
+auto-refreshes every 30s via a small `/api/alerts` JSON endpoint.
+
 > **Important design rule (from the brief):** the inventory checker is the
 > single biggest long-term reliability risk. It lives entirely behind
 > `bot/inventory/` so the SerpApi provider can be hardened — or swapped for
@@ -90,7 +108,9 @@ Railway worker service, no exposed port.
 | `bot/discord_bot.py` | bot, poll loop, `!check` / `!ping` commands |
 | `bot/alerts.py` | Discord embed formatting |
 | `bot/inventory/` | the swappable Problem-B boundary (`base.py`, `serpapi_provider.py`) |
-| `tests/` | unit tests for extractor, state, inventory value types |
+| `bot/llm_extractor.py` | Phase 3 Claude fallback for messy posts |
+| `bot/dashboard.py` | optional aiohttp web dashboard of alert history |
+| `tests/` | unit tests for extractor, state, inventory, watcher, dashboard |
 
 ---
 
@@ -177,10 +197,13 @@ python -m scripts.probe_serpapi 312345678 --engine home_depot_product \
 
 1. New project → **Deploy from GitHub repo** (this repo, branch
    `claude/stoic-sagan-q1ehxc`).
-2. **Service type must be a worker, not a web service.** This bot does not
-   listen on a port; a web service would be killed for "no port detected".
-   The included `Procfile` declares `worker: python main.py`; `railway.json`
-   sets the start command and an on-failure restart policy.
+2. **Service type:** by default this bot does not listen on a port, so run it as
+   a **worker** (a web service would be killed for "no port detected"). The
+   included `Procfile` declares `worker: python main.py`; `railway.json` sets the
+   start command and an on-failure restart policy.
+   *If you want the web dashboard*, run it instead as a **web** service and set
+   `DASHBOARD_TOKEN` — Railway injects `PORT`, the bot serves the dashboard on
+   it, and the Reddit/Discord background work runs alongside in the same process.
 3. Add all env vars from `.env.example` under the service's **Variables**.
 4. **Persist SQLite across redeploys:** Railway containers are ephemeral.
    Add a **Volume** mounted at e.g. `/data` and set `DB_PATH=/data/penny.sqlite3`.
@@ -228,4 +251,4 @@ best-effort guesses and **must** be checked against live JSON. Use
 `python -m scripts.probe_serpapi <SKU> --store <id>` (see above), then `!check`.
 
 Stretch items from the brief still open: a custom HD scraper to cut API cost,
-a web dashboard of alert history, and Lowe's support.
+and Lowe's support. (The web dashboard stretch goal is implemented — see above.)

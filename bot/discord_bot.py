@@ -55,6 +55,15 @@ class PennyBot(commands.Bot):
                 model=cfg.llm_model,
                 max_calls_per_poll=cfg.llm_max_calls_per_poll,
             )
+        # Phase 3 stretch: optional web dashboard (None unless a port is set).
+        self.dashboard = None
+        if cfg.dashboard_port:
+            from .dashboard import Dashboard
+
+            self.dashboard = Dashboard(
+                self.state, port=cfg.dashboard_port,
+                token=cfg.dashboard_token, store_ids=self.store_ids,
+            )
         self._consecutive_poll_failures = 0
         self._consecutive_inventory_failures = 0
         self.add_commands()
@@ -86,6 +95,8 @@ class PennyBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.poll_reddit.change_interval(seconds=self.cfg.reddit_poll_seconds)
         self.poll_reddit.start()
+        if self.dashboard:
+            await self.dashboard.start()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user.id if self.user else "?")
@@ -101,9 +112,13 @@ class PennyBot(commands.Bot):
                      "(set INVENTORY_PROVIDER + DEFAULT_STORE_ID to enable verification)")
         log.info("LLM SKU fallback: %s",
                  f"on ({self.cfg.llm_model})" if self.llm else "off")
+        log.info("Web dashboard: %s",
+                 f"on (:{self.cfg.dashboard_port})" if self.dashboard else "off")
 
     async def close(self) -> None:
         self.poll_reddit.cancel()
+        if self.dashboard:
+            await self.dashboard.stop()
         await self.watcher.close()
         await self.inventory.close()
         if self.llm:
@@ -143,6 +158,14 @@ class PennyBot(commands.Bot):
                     await self._handle_verified(mention, channel)
                 else:
                     await channel.send(embed=alerts.mention_embed(mention))
+                    self.state.log_alert(
+                        kind="mention",
+                        sku=(mention.extraction.internet_ids[0]
+                             if mention.extraction.internet_ids else None),
+                        name=mention.title[:200],
+                        subreddit=f"r/{mention.subreddit}",
+                        source_url=mention.permalink,
+                    )
                 # Mark seen once handled so we don't re-process every cycle. In
                 # verified mode a SKU that isn't penny'd *right now* won't be
                 # re-checked later — an accepted v1 cost/noise tradeoff.
@@ -172,6 +195,13 @@ class PennyBot(commands.Bot):
                         embed=alerts.status_embed(status, source=source, threshold=threshold)
                     )
                     self.state.record_alert(sku, store_id)
+                    self.state.log_alert(
+                        kind="hit", sku=sku, store_id=store_id,
+                        name=status.name, price=status.price,
+                        quantity=status.inventory_quantity,
+                        subreddit=f"r/{mention.subreddit}",
+                        source_url=mention.permalink,
+                    )
                 else:
                     log.info("SKU %s @ %s not a hit (%s)", sku, store_id,
                              status.error or f"price={status.price} qty={status.inventory_quantity}")

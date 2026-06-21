@@ -58,6 +58,10 @@ class Config:
     llm_model: str
     llm_max_calls_per_poll: int
 
+    # Web dashboard (Phase 3 stretch)
+    dashboard_port: int | None
+    dashboard_token: str | None
+
     # State
     db_path: str
 
@@ -66,6 +70,10 @@ class Config:
         commands_channel = os.environ.get("DISCORD_COMMANDS_CHANNEL_ID", "").strip()
         owner = os.environ.get("DISCORD_OWNER_ID", "").strip()
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        dashboard_port = (
+            os.environ.get("DASHBOARD_PORT", "").strip()
+            or os.environ.get("PORT", "").strip()
+        )
         return Config(
             discord_bot_token=_req("DISCORD_BOT_TOKEN"),
             discord_alerts_channel_id=int(_req("DISCORD_ALERTS_CHANNEL_ID")),
@@ -92,5 +100,8 @@ class Config:
             ),
             llm_model=os.environ.get("LLM_MODEL", "claude-opus-4-8").strip(),
             llm_max_calls_per_poll=int(os.environ.get("LLM_MAX_CALLS_PER_POLL", "5")),
+            # DASHBOARD_PORT, or Railway's injected PORT, enables the dashboard.
+            dashboard_port=(int(dashboard_port) if dashboard_port else None),
+            dashboard_token=os.environ.get("DASHBOARD_TOKEN", "").strip() or None,
             db_path=os.environ.get("DB_PATH", "data/penny.sqlite3").strip(),
         )

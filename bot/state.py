@@ -47,6 +47,22 @@ class State:
                 store_id  TEXT PRIMARY KEY,       -- added at runtime via !addstore
                 added_at  INTEGER NOT NULL
             );
+
+            -- Full record of every alert we posted, for the web dashboard.
+            -- (alert_history above is dedup-only and intentionally thin.)
+            CREATE TABLE IF NOT EXISTS alerts_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts         INTEGER NOT NULL,
+                kind       TEXT NOT NULL,          -- 'mention' | 'hit'
+                sku        TEXT,
+                store_id   TEXT,
+                name       TEXT,
+                price      REAL,
+                quantity   INTEGER,
+                subreddit  TEXT,
+                source_url TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_alerts_log_ts ON alerts_log (ts DESC);
             """
         )
         self._conn.commit()
@@ -104,6 +120,55 @@ class State:
             "SELECT store_id FROM watched_stores ORDER BY added_at"
         )
         return [row["store_id"] for row in cur.fetchall()]
+
+    # ── Alert log for the web dashboard (Phase 3 stretch) ────────────────────
+    def log_alert(
+        self,
+        *,
+        kind: str,
+        sku: str | None = None,
+        store_id: str | None = None,
+        name: str | None = None,
+        price: float | None = None,
+        quantity: int | None = None,
+        subreddit: str | None = None,
+        source_url: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO alerts_log "
+            "(ts, kind, sku, store_id, name, price, quantity, subreddit, source_url) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (int(time.time()), kind, sku, store_id, name, price, quantity,
+             subreddit, source_url),
+        )
+        self._conn.commit()
+
+    def recent_alerts(self, limit: int = 100) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT ts, kind, sku, store_id, name, price, quantity, subreddit, source_url "
+            "FROM alerts_log ORDER BY ts DESC, id DESC LIMIT ?",
+            (max(1, min(limit, 1000)),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def alert_stats(self) -> dict:
+        """Lightweight counters for the dashboard header."""
+        cur = self._conn.execute(
+            "SELECT "
+            "  COUNT(*) AS total, "
+            "  SUM(CASE WHEN kind='hit' THEN 1 ELSE 0 END) AS hits, "
+            "  SUM(CASE WHEN kind='mention' THEN 1 ELSE 0 END) AS mentions, "
+            "  MAX(ts) AS last_ts "
+            "FROM alerts_log"
+        )
+        row = cur.fetchone()
+        return {
+            "total": row["total"] or 0,
+            "hits": row["hits"] or 0,
+            "mentions": row["mentions"] or 0,
+            "last_ts": row["last_ts"],
+            "stores_watched": len(self.list_stores()),
+        }
 
     def close(self) -> None:
         self._conn.close()
