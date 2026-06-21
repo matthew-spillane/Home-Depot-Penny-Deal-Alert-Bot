@@ -129,6 +129,28 @@ python -m pytest -q
 Tests cover the pure logic (SKU regex, SQLite dedup, penny-hit rule, provider
 factory) — no network or secrets required.
 
+### Validating the SerpApi mapping (do this before trusting Phase 2)
+
+The SerpApi field paths in `serpapi_provider._parse` are best-effort until
+checked against a live response. Use the probe to compare the raw JSON against
+what the bot's penny-hit gate actually sees:
+
+```bash
+export SERPAPI_KEY=...                       # or put it in .env
+python -m scripts.probe_serpapi 312345678 --store 2667
+```
+
+It prints the **raw** SerpApi JSON, then the **mapped** `ItemStatus`, and warns
+if `price`/`quantity` failed to map. If a value is wrong, edit `_parse` and
+re-run until they line up. The engine name and request params are also guesses
+— override them without code changes via `--engine` and `--param K=V`:
+
+```bash
+python -m scripts.probe_serpapi 312345678 --engine home_depot_product \
+    --param delivery_zip=01902 --raw-only
+```
+
+
 ---
 
 ## Deploy on Railway
