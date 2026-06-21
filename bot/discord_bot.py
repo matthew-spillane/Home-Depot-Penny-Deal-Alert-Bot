@@ -14,7 +14,7 @@ import re
 import discord
 from discord.ext import commands, tasks
 
-from . import alerts, sku_extractor
+from . import alerts
 from .config_types import Config
 from .inventory import InventoryProvider, build_provider
 from .reddit_watcher import RedditWatcher
@@ -45,20 +45,41 @@ class PennyBot(commands.Bot):
         self.inventory: InventoryProvider = build_provider(
             cfg.inventory_provider, serpapi_key=cfg.serpapi_key
         )
+        # Phase 3: optional LLM fallback for messy posts (None when disabled).
+        self.llm = None
+        if cfg.llm_fallback_enabled and cfg.anthropic_api_key:
+            from .llm_extractor import LLMExtractor
+
+            self.llm = LLMExtractor(
+                api_key=cfg.anthropic_api_key,
+                model=cfg.llm_model,
+                max_calls_per_poll=cfg.llm_max_calls_per_poll,
+            )
         self._consecutive_poll_failures = 0
         self._consecutive_inventory_failures = 0
         self.add_commands()
 
+    def store_ids(self) -> list[str]:
+        """Effective set of stores to check: config (DEFAULT_STORE_ID + STORE_IDS)
+        unioned with any added at runtime via !addstore. Order-stable, de-duped."""
+        out: list[str] = []
+        for sid in [self.cfg.default_store_id, *self.cfg.extra_store_ids,
+                    *self.state.list_stores()]:
+            if sid and sid not in out:
+                out.append(sid)
+        return out
+
     @property
     def verification_active(self) -> bool:
-        """Phase 2 is live when a real inventory provider AND a store are set.
+        """Phase 2/3 verification is live when a real inventory provider AND at
+        least one store are configured.
 
         When False we fall back to Phase 1 behavior (post every mention,
         unverified) so the bot is still useful before SerpApi/store config.
         """
         return (
             self.cfg.inventory_provider not in ("none", "", "null")
-            and bool(self.cfg.default_store_id)
+            and bool(self.store_ids())
         )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -71,26 +92,34 @@ class PennyBot(commands.Bot):
         log.info("Watching r/%s every %ss", self.watcher.subreddit_str, self.cfg.reddit_poll_seconds)
         if self.verification_active:
             log.info(
-                "Phase 2 active: verifying SKUs at store %s via '%s' (threshold $%.2f)",
-                self.cfg.default_store_id, self.cfg.inventory_provider,
+                "Verification active: checking stores %s via '%s' (threshold $%.2f)",
+                ", ".join(self.store_ids()), self.cfg.inventory_provider,
                 self.cfg.penny_price_threshold,
             )
         else:
             log.info("Phase 1 mode: posting unverified mentions "
                      "(set INVENTORY_PROVIDER + DEFAULT_STORE_ID to enable verification)")
+        log.info("LLM SKU fallback: %s",
+                 f"on ({self.cfg.llm_model})" if self.llm else "off")
 
     async def close(self) -> None:
         self.poll_reddit.cancel()
         await self.watcher.close()
         await self.inventory.close()
+        if self.llm:
+            await self.llm.close()
         self.state.close()
         await super().close()
 
     # ── Reddit poll loop ─────────────────────────────────────────────────────
     @tasks.loop(seconds=90)
     async def poll_reddit(self) -> None:
+        llm_extract = None
+        if self.llm:
+            self.llm.reset_budget()  # refill the per-poll LLM call budget
+            llm_extract = self.llm.extract_item_ids
         try:
-            mentions = await self.watcher.poll(self.state.is_seen)
+            mentions = await self.watcher.poll(self.state.is_seen, llm_extract)
             self._consecutive_poll_failures = 0
         except Exception:
             self._consecutive_poll_failures += 1
@@ -123,29 +152,29 @@ class PennyBot(commands.Bot):
                 # leave unseen so we retry next cycle
 
     async def _handle_verified(self, mention, channel) -> None:
-        """Phase 2: only alert when a mentioned SKU is a real penny hit at the
-        configured store (price <= threshold AND in stock)."""
-        store_id = self.cfg.default_store_id or ""
+        """Phase 2/3: only alert when a mentioned SKU is a real penny hit
+        (price <= threshold AND in stock) at one of the watched stores."""
         threshold = self.cfg.penny_price_threshold
         source = f"[r/{mention.subreddit} {mention.kind}]({mention.permalink})"
 
         for sku in mention.extraction.all_skus:
-            # Per-(SKU, store) daily dedup so the same hit mentioned across many
-            # posts only pings once a day.
-            if self.state.already_alerted_today(sku, store_id):
-                continue
+            for store_id in self.store_ids():
+                # Per-(SKU, store) daily dedup so the same hit mentioned across
+                # many posts only pings once a day, per store.
+                if self.state.already_alerted_today(sku, store_id):
+                    continue
 
-            status = await self.inventory.check_item(sku, store_id)
-            self._track_inventory_health(status)
+                status = await self.inventory.check_item(sku, store_id)
+                self._track_inventory_health(status)
 
-            if status.is_penny_hit(threshold):
-                await channel.send(
-                    embed=alerts.status_embed(status, source=source, threshold=threshold)
-                )
-                self.state.record_alert(sku, store_id)
-            else:
-                log.info("SKU %s @ %s not a hit (%s)", sku, store_id,
-                         status.error or f"price={status.price} qty={status.inventory_quantity}")
+                if status.is_penny_hit(threshold):
+                    await channel.send(
+                        embed=alerts.status_embed(status, source=source, threshold=threshold)
+                    )
+                    self.state.record_alert(sku, store_id)
+                else:
+                    log.info("SKU %s @ %s not a hit (%s)", sku, store_id,
+                             status.error or f"price={status.price} qty={status.inventory_quantity}")
 
     def _track_inventory_health(self, status) -> None:
         """DM the owner if the inventory API starts failing repeatedly, so a
@@ -177,22 +206,25 @@ class PennyBot(commands.Bot):
         except Exception:
             log.exception("Could not DM owner")
 
+    def _in_command_channel(self, ctx: commands.Context) -> bool:
+        if not self.cfg.discord_commands_channel_id:
+            return True
+        return ctx.channel.id in (
+            self.cfg.discord_commands_channel_id,
+            self.cfg.discord_alerts_channel_id,
+        )
+
     # ── commands ─────────────────────────────────────────────────────────────
     def add_commands(self) -> None:
         @self.command(name="check")
-        async def check(ctx: commands.Context, *, arg: str = ""):
-            """!check <SKU or homedepot.com product URL> — verify at your store."""
-            if self.cfg.discord_commands_channel_id and (
-                ctx.channel.id not in (
-                    self.cfg.discord_commands_channel_id,
-                    self.cfg.discord_alerts_channel_id,
-                )
-            ):
+        async def check(ctx: commands.Context, *args: str):
+            """!check <SKU|url> [store_id] — verify at a store (default: first)."""
+            if not self._in_command_channel(ctx):
                 return
 
-            item_id = self._parse_item_id(arg)
+            item_id = self._parse_item_id(" ".join(args))
             if not item_id:
-                await ctx.reply("Usage: `!check <SKU>` or `!check <homedepot.com product URL>`")
+                await ctx.reply("Usage: `!check <SKU>` or `!check <homedepot.com product URL> [store_id]`")
                 return
 
             if self.cfg.inventory_provider in ("none", "", "null"):
@@ -203,11 +235,17 @@ class PennyBot(commands.Bot):
                 )
                 return
 
-            store_id = self.cfg.default_store_id or ""
+            # Optional explicit store id as the last arg; else the first watched.
+            stores = self.store_ids()
+            store_id = ""
+            if len(args) >= 2 and args[-1].isdigit() and args[-1] != item_id:
+                store_id = args[-1]
+            elif stores:
+                store_id = stores[0]
             if not store_id:
                 await ctx.reply(
-                    f"Found item `{item_id}`, but no `DEFAULT_STORE_ID` is configured, "
-                    f"so I can't check store inventory yet."
+                    f"Found item `{item_id}`, but no store is configured "
+                    f"(`DEFAULT_STORE_ID` / `STORE_IDS` / `!addstore`)."
                 )
                 return
 
@@ -219,6 +257,50 @@ class PennyBot(commands.Bot):
                     source=f"requested by {ctx.author.mention}",
                     threshold=self.cfg.penny_price_threshold,
                 )
+            )
+
+        @self.command(name="addstore")
+        async def addstore(ctx: commands.Context, store_id: str = ""):
+            """!addstore <store_id> — also watch this store for penny hits."""
+            if not self._in_command_channel(ctx):
+                return
+            if not store_id.isdigit():
+                await ctx.reply("Usage: `!addstore <store_id>` (digits only)")
+                return
+            added = self.state.add_store(store_id)
+            await ctx.reply(
+                f"{'Added' if added else 'Already watching'} store `{store_id}`. "
+                f"Now watching: {', '.join(f'`{s}`' for s in self.store_ids())}"
+            )
+
+        @self.command(name="removestore")
+        async def removestore(ctx: commands.Context, store_id: str = ""):
+            """!removestore <store_id> — stop watching a runtime-added store."""
+            if not self._in_command_channel(ctx):
+                return
+            if not store_id:
+                await ctx.reply("Usage: `!removestore <store_id>`")
+                return
+            removed = self.state.remove_store(store_id)
+            if not removed:
+                await ctx.reply(
+                    f"`{store_id}` isn't a runtime-added store. "
+                    f"(Config stores from DEFAULT_STORE_ID/STORE_IDS can't be removed at runtime.)"
+                )
+                return
+            await ctx.reply(
+                f"Removed store `{store_id}`. Now watching: "
+                f"{', '.join(f'`{s}`' for s in self.store_ids()) or '(none)'}"
+            )
+
+        @self.command(name="liststores")
+        async def liststores(ctx: commands.Context):
+            """!liststores — show the stores currently being watched."""
+            if not self._in_command_channel(ctx):
+                return
+            stores = self.store_ids()
+            await ctx.reply(
+                "Watching: " + (", ".join(f"`{s}`" for s in stores) if stores else "(none configured)")
             )
 
         @self.command(name="ping")

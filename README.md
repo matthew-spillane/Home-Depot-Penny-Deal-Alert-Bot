@@ -19,7 +19,7 @@ phases slot into. See [the build order](#build-phases) below.
 |------|-------|-------|
 | **1** | Reddit → Discord raw "possible penny deal mentioned" alerts, regex SKU extraction, SQLite dedup | ✅ implemented |
 | **2** | Store inventory verification behind a swappable `check_item()` interface (SerpApi); poll loop alerts only on verified penny hits; `!check` command | ✅ implemented — pending a real SerpApi key + store id to validate field mappings against live data |
-| **3** | Daily alert dedup, failure DMs, LLM SKU fallback, multi-store | 🟡 daily dedup + inventory/poll failure DMs done; LLM fallback + multi-store not started |
+| **3** | Daily alert dedup, failure DMs, LLM SKU fallback, multi-store | ✅ implemented — daily dedup, inventory/poll failure DMs, Claude LLM fallback for messy posts, multi-store watching + `!addstore`/`!removestore`/`!liststores` |
 
 ### How verification gates alerts (Phase 2)
 
@@ -37,6 +37,26 @@ The bot has two modes, chosen automatically at startup:
 If inventory lookups start failing repeatedly (HTTP errors / timeouts — *not*
 "item not found"), the bot DMs `DISCORD_OWNER_ID` so a silently-broken provider
 gets noticed fast.
+
+### LLM SKU fallback (Phase 3)
+
+Regex handles clean posts for free. When a post *reads* like a penny deal but
+regex finds no item id, the bot can ask Claude to extract the SKU. It's strictly
+a fallback: regex first, and the LLM is only called when a post is pennyish
+**and** id-less, capped at `LLM_MAX_CALLS_PER_POLL` calls per cycle to bound
+cost. Enabled automatically when `ANTHROPIC_API_KEY` is set; defaults to
+`claude-opus-4-8` — set `LLM_MODEL=claude-haiku-4-5` if you'd rather trade a
+little accuracy for lower cost on this high-volume path. The model returns a
+structured `{item_ids, is_penny_deal}` result, and ids are re-validated
+(6–12 digits) before they're trusted.
+
+### Multi-store (Phase 3)
+
+Watch more than one store. Configure a base set via `DEFAULT_STORE_ID` +
+`STORE_IDS` (comma-separated), and add/remove stores live with `!addstore` /
+`!removestore` (runtime stores persist in SQLite). Each extracted SKU is checked
+against every watched store; penny-hit dedup is per-`(SKU, store)` so each store
+can alert independently. Handy once the Peabody shop is in play.
 
 > **Important design rule (from the brief):** the inventory checker is the
 > single biggest long-term reliability risk. It lives entirely behind
@@ -173,8 +193,11 @@ python -m scripts.probe_serpapi 312345678 --engine home_depot_product \
 | Command | Effect |
 |---------|--------|
 | `!ping` | health check (`pong 🪙`) |
-| `!check <SKU>` | look up a SKU at `DEFAULT_STORE_ID` (Phase 2; replies that checking is disabled until a provider + store id are configured) |
+| `!check <SKU> [store_id]` | look up a SKU at a watched store (defaults to the first; optional explicit store id). Replies that checking is disabled until a provider + store are configured |
 | `!check <homedepot.com product URL>` | same, parsing the item id out of the URL |
+| `!addstore <store_id>` | also watch this store for penny hits (persists across restarts) |
+| `!removestore <store_id>` | stop watching a runtime-added store |
+| `!liststores` | show the stores currently being watched |
 
 ---
 
@@ -193,14 +216,16 @@ python -m scripts.probe_serpapi 312345678 --engine home_depot_product \
 
 ## Build phases
 
-Follows the brief's Section 8 in order. Phase 1 (Reddit→Discord) and Phase 2
-(store verification) are implemented. **Remaining to fully trust Phase 2:**
-obtain a SerpApi key, confirm your store number, then verify the field mappings
-in `serpapi_provider._parse` against a real response — the engine name
-(`home_depot_product`), the `product_id`/`store_id` params, and the
-price/quantity/aisle paths are best-effort guesses and **must** be checked
-against live JSON before relying on the price gate. Run `!check <SKU>` against a
-known item to confirm the mapping end-to-end.
+Follows the brief's Section 8 in order. Phases 1–3 are implemented: Reddit→Discord
+alerts, store verification, daily dedup + failure DMs, the Claude LLM SKU
+fallback, and multi-store watching.
 
-Phase 3 leftovers: LLM SKU fallback for messy posts, `!addstore` multi-store
-support.
+**Remaining to fully trust Phase 2's price gate:** obtain a SerpApi key, confirm
+your store number, then verify the field mappings in `serpapi_provider._parse`
+against a real response — the engine name (`home_depot_product`), the
+`product_id`/`store_id` params, and the price/quantity/aisle paths are
+best-effort guesses and **must** be checked against live JSON. Use
+`python -m scripts.probe_serpapi <SKU> --store <id>` (see above), then `!check`.
+
+Stretch items from the brief still open: a custom HD scraper to cut API cost,
+a web dashboard of alert history, and Lowe's support.

@@ -11,7 +11,7 @@ posts.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import asyncpraw
 
@@ -58,13 +58,16 @@ class RedditWatcher:
     def subreddit_str(self) -> str:
         return "+".join(self._subreddits)
 
-    async def poll(self, is_seen) -> list[Mention]:
+    async def poll(self, is_seen, llm_extract=None) -> list[Mention]:
         """Scan new posts and comments; return mentions not yet seen.
 
         `is_seen(reddit_id) -> bool` lets the caller dedupe against persistent
         state. We do NOT mark items seen here — the caller does that after it
         has successfully handled the mention, so a crash mid-handling doesn't
         silently drop an alert.
+
+        `llm_extract(text) -> list[str]` is the optional Phase 3 LLM fallback,
+        called only when regex finds no id but the post smells pennyish.
         """
         mentions: list[Mention] = []
         try:
@@ -75,7 +78,7 @@ class RedditWatcher:
                 if is_seen(rid):
                     continue
                 text = f"{submission.title}\n{submission.selftext or ''}"
-                extraction = sku_extractor.extract(text)
+                extraction = await self._extract(text, llm_extract)
                 if self._is_relevant(extraction):
                     mentions.append(self._mention_from_submission(submission, extraction))
 
@@ -83,7 +86,7 @@ class RedditWatcher:
                 rid = comment.fullname
                 if is_seen(rid):
                     continue
-                extraction = sku_extractor.extract(comment.body or "")
+                extraction = await self._extract(comment.body or "", llm_extract)
                 if self._is_relevant(extraction):
                     mentions.append(self._mention_from_comment(comment, extraction))
 
@@ -92,6 +95,19 @@ class RedditWatcher:
             raise
 
         return mentions
+
+    @staticmethod
+    async def _extract(text: str, llm_extract) -> ExtractionResult:
+        """Regex first; LLM fallback only when regex found no id but the post
+        reads pennyish (cheap/free path handles the common case)."""
+        extraction = sku_extractor.extract(text)
+        if extraction.internet_ids or not extraction.looks_pennyish or llm_extract is None:
+            return extraction
+        llm_ids = await llm_extract(text)
+        if not llm_ids:
+            return extraction
+        log.info("LLM fallback recovered %d id(s) from a pennyish post", len(llm_ids))
+        return replace(extraction, internet_ids=llm_ids)
 
     @staticmethod
     def _is_relevant(extraction: ExtractionResult) -> bool:

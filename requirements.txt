@@ -6,3 +6,6 @@ python-dotenv>=1.0
 # Phase 2 (inventory checker) — used by the SerpApi provider skeleton.
 # Safe to install now; not exercised until Phase 2 is enabled.
 aiohttp>=3.9
+
+# Phase 3 (LLM SKU fallback) — only used when ANTHROPIC_API_KEY is set.
+anthropic>=0.49

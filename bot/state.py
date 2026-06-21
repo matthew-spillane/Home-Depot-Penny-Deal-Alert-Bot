@@ -42,6 +42,11 @@ class State:
                 alerted_at INTEGER NOT NULL,
                 PRIMARY KEY (sku, store_id, alert_day)
             );
+
+            CREATE TABLE IF NOT EXISTS watched_stores (
+                store_id  TEXT PRIMARY KEY,       -- added at runtime via !addstore
+                added_at  INTEGER NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -75,6 +80,30 @@ class State:
             (sku, store_id, date.today().isoformat(), int(time.time())),
         )
         self._conn.commit()
+
+    # ── Runtime-added watched stores (Phase 3 multi-store) ───────────────────
+    def add_store(self, store_id: str) -> bool:
+        """Add a store; returns True if newly added, False if already present."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO watched_stores (store_id, added_at) VALUES (?, ?)",
+            (store_id, int(time.time())),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def remove_store(self, store_id: str) -> bool:
+        """Remove a store; returns True if it was present."""
+        cur = self._conn.execute(
+            "DELETE FROM watched_stores WHERE store_id = ?", (store_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_stores(self) -> list[str]:
+        cur = self._conn.execute(
+            "SELECT store_id FROM watched_stores ORDER BY added_at"
+        )
+        return [row["store_id"] for row in cur.fetchall()]
 
     def close(self) -> None:
         self._conn.close()
